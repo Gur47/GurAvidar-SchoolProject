@@ -1,6 +1,12 @@
 import socket
 import tkinter as tk
 from tkinter import messagebox
+import threading
+import time
+import io
+import base64
+from PIL import Image, ImageTk
+import pyautogui
 from encrypt import Encryption
 from constants import IP, PORT
 
@@ -26,134 +32,168 @@ class Client:
             return self.encryptor.receive_encrypted_message(self.sock)
         return ""
 
-    def close(self):
-        if self.connected:
-            self.sock.close()
-            self.connected = False
-
-
 class ClientGUI:
     def __init__(self):
         self.client = Client()
         self.client.connect()
-
         self.root = tk.Tk()
         self.root.title("Parental Control")
-        self.root.geometry("400x350")
+        self.root.geometry("700x700")
+        
+        # משתני סטטוס
+        self.is_streaming = False
+        self.screen_label = None
+        
         self.build_login_screen()
 
     def clear_screen(self):
         for widget in self.root.winfo_children():
             widget.destroy()
 
-    # ---------- login ----------
+    # ---------- Login Screen ----------
     def build_login_screen(self):
         self.clear_screen()
-        tk.Label(self.root, text="Login", font=("Arial", 16)).pack(pady=10)
-        tk.Label(self.root, text="Username").pack()
+        tk.Label(self.root, text="Login", font=("Arial", 18)).pack(pady=10)
+        
+        tk.Label(self.root, text="Username:").pack()
         self.username_entry = tk.Entry(self.root)
         self.username_entry.pack()
-        tk.Label(self.root, text="Password").pack()
+        
+        tk.Label(self.root, text="Password:").pack()
         self.password_entry = tk.Entry(self.root, show="*")
         self.password_entry.pack()
-        tk.Button(self.root, text="Login", command=self.login).pack(pady=10)
-        tk.Button(self.root, text="Press here to register", fg="blue", command=self.build_register_screen).pack()
+        
+        tk.Button(self.root, text="Login", command=self.login, width=15).pack(pady=10)
+        tk.Button(self.root, text="Switch to Register", command=self.build_register_screen).pack()
 
     def login(self):
-        username = self.username_entry.get()
-        password = self.password_entry.get()
-        if not username or not password:
-            messagebox.showerror("error", "fill all fields")
-            return
-        self.client.send(f"LOGIN|{username}|{password}")
-        response = self.client.receive()
+        u, p = self.username_entry.get(), self.password_entry.get()
+        if not u or not p: return
+        self.client.send(f"LOGIN|{u}|{p}")
+        res = self.client.receive()
         
-        if response.startswith("LOGIN_OK"):
-            parts = response.split("|")
+        if res.startswith("LOGIN_OK"):
+            parts = res.split("|")
             role = parts[1]
-            sibling_status = parts[2] # "CONNECTED" או "NO_SIBLING"
+            # התחלת האזנה לפקודות ברקע (חשוב לילד לקבל פקודות ולהורה לקבל תמונות)
+            threading.Thread(target=self.listen_to_server, daemon=True).start()
             
-            if role == "parent":
-                if sibling_status == "NO_SIBLING":
-                    messagebox.showinfo("info", "Welcome! Please link a child using your ID.")
-                self.build_parent_screen()
-            else:
-                if sibling_status == "NO_SIBLING":
-                    messagebox.showerror("error", "Child account not linked properly.")
-                    return
-                self.build_child_screen()
+            if role == "parent": self.build_parent_screen()
+            else: self.build_child_screen()
         else:
-            messagebox.showerror("error", "Login failed: check username/password")
+            messagebox.showerror("Error", "Invalid credentials")
 
-    # ---------- register ----------
+    # ---------- Register Screen ----------
     def build_register_screen(self):
         self.clear_screen()
-        tk.Label(self.root, text="Register", font=("Arial", 16)).pack(pady=10)
-        tk.Label(self.root, text="Username").pack()
-        self.reg_username = tk.Entry(self.root)
-        self.reg_username.pack()
-        tk.Label(self.root, text="Password").pack()
-        self.reg_password = tk.Entry(self.root, show="*")
-        self.reg_password.pack()
-        tk.Label(self.root, text="Role").pack()
+        tk.Label(self.root, text="Register", font=("Arial", 18)).pack(pady=10)
+        
+        tk.Label(self.root, text="Username:").pack()
+        self.reg_user = tk.Entry(self.root)
+        self.reg_user.pack()
+        
+        tk.Label(self.root, text="Password:").pack()
+        self.reg_pass = tk.Entry(self.root, show="*")
+        self.reg_pass.pack()
+        
         self.role_var = tk.StringVar(value="parent")
-        tk.Radiobutton(self.root, text="parent", variable=self.role_var, value="parent").pack()
-        tk.Radiobutton(self.root, text="child", variable=self.role_var, value="child").pack()
-        tk.Label(self.root, text="Parent ID (if child)").pack()
+        tk.Radiobutton(self.root, text="Parent", variable=self.role_var, value="parent", command=self.toggle_parent_id).pack()
+        tk.Radiobutton(self.root, text="Child", variable=self.role_var, value="child", command=self.toggle_parent_id).pack()
+        
+        self.parent_id_label = tk.Label(self.root, text="Enter Parent ID:")
         self.parent_id_entry = tk.Entry(self.root)
-        self.parent_id_entry.pack()
-        tk.Button(self.root, text="Register", command=self.register).pack(pady=10)
-        tk.Button(self.root, text="Back", command=self.build_login_screen).pack()
+        
+        tk.Button(self.root, text="Register", command=self.register, width=15).pack(pady=10)
+        tk.Button(self.root, text="Back to Login", command=self.build_login_screen).pack()
+
+    def toggle_parent_id(self):
+        if self.role_var.get() == "child":
+            self.parent_id_label.pack()
+            self.parent_id_entry.pack()
+        else:
+            self.parent_id_label.pack_forget()
+            self.parent_id_entry.pack_forget()
 
     def register(self):
-        username = self.reg_username.get()
-        password = self.reg_password.get()
-        role = self.role_var.get()
-        
+        u, p, role = self.reg_user.get(), self.reg_pass.get(), self.role_var.get()
         if role == "child":
-            parent_id = self.parent_id_entry.get()
-            if not parent_id.isdigit():
-                messagebox.showerror("error", "Please enter a valid Parent ID")
-                return
-            msg = f"REGISTER|{username}|{password}|{role}|{parent_id}"
+            p_id = self.parent_id_entry.get()
+            msg = f"REGISTER|{u}|{p}|{role}|{p_id}"
         else:
-            msg = f"REGISTER|{username}|{password}|{role}"
+            msg = f"REGISTER|{u}|{p}|{role}|0"
             
         self.client.send(msg)
-        response = self.client.receive()
-        
-        if response.startswith("REGISTER_OK"):
-            new_id = response.split("|")[1]
-            messagebox.showinfo("Success", f"Registered successfully!\nYour ID is: {new_id}\nUse this ID to link your child.")
+        res = self.client.receive()
+        if res.startswith("REGISTER_OK"):
+            new_id = res.split("|")[1]
+            messagebox.showinfo("Success", f"Registered! Your ID: {new_id}")
             self.build_login_screen()
-        elif "REGISTER_PARENT_NOT_FOUND" in response:
-            messagebox.showerror("error", "Parent ID not found in system")
-        elif "REGISTER_PARENT_BUSY" in response:
-            messagebox.showerror("error", "This parent already has a child linked")
         else:
-            messagebox.showerror("error", "Registration failed")
+            messagebox.showerror("Error", "Registration failed (Check Parent ID)")
 
-    # ---------- parent screen ----------
+    # ---------- Communication Logic ----------
+    def listen_to_server(self):
+        while True:
+            msg = self.client.receive()
+            if not msg: break
+            parts = msg.split("|")
+            cmd = parts[0]
+
+            if cmd == "SCREEN_START":
+                self.is_streaming = True
+                threading.Thread(target=self.stream_screen_loop, daemon=True).start()
+            elif cmd == "SCREEN_STOP":
+                self.is_streaming = False
+            elif cmd == "SCREEN_DATA":
+                self.display_frame(parts[1])
+
+    def stream_screen_loop(self):
+        while self.is_streaming:
+            shot = pyautogui.screenshot()
+            shot = shot.resize((640, 360)) # גודל מוקטן לביצועים
+            buf = io.BytesIO()
+            shot.save(buf, format='JPEG', quality=40)
+            b64_str = base64.b64encode(buf.getvalue()).decode()
+            self.client.send(f"FORWARD|SCREEN_DATA|{b64_str}")
+            time.sleep(0.1)
+
+    def display_frame(self, data):
+        img_bytes = base64.b64decode(data)
+        img = Image.open(io.BytesIO(img_bytes))
+        photo = ImageTk.PhotoImage(img)
+        if self.screen_label:
+            self.screen_label.config(image=photo)
+            self.screen_label.image = photo
+
+    # ---------- Panels ----------
     def build_parent_screen(self):
         self.clear_screen()
         tk.Label(self.root, text="Parent Control Panel", font=("Arial", 16)).pack(pady=10)
-        tk.Button(self.root, text="Start screen share", command=lambda: self.client.send("SCREEN_START")).pack(pady=5)
-        tk.Button(self.root, text="Start keylogger", command=lambda: self.client.send("KEYLOG_START")).pack(pady=5)
-        tk.Button(self.root, text="Logout", command=self.logout).pack(pady=10)
 
-    # ---------- child screen ----------
+        btn_frame = tk.Frame(self.root)
+        btn_frame.pack()
+
+        tk.Button(self.root, text="Start Screen Share", command=self.start_stream_req, bg="lightgreen").pack(pady=5)
+        tk.Button(self.root, text="Stop Screen Share", command=self.stop_stream_req, bg="lightcoral").pack(pady=5)
+        
+        self.screen_label = tk.Label(self.root, bg="gray", highlightbackground="green", highlightthickness=10)
+        self.screen_label.pack(pady=20)
+
+    def start_stream_req(self):
+        self.client.send("FORWARD|SCREEN_START")
+
+    def stop_stream_req(self):
+        self.client.send("FORWARD|SCREEN_STOP")
+        if self.screen_label:
+            self.screen_label.config(image='')
+            self.screen_label.image = None
+
+
     def build_child_screen(self):
         self.clear_screen()
-        tk.Label(self.root, text="Child Connected", font=("Arial", 16)).pack(pady=40)
-        tk.Label(self.root, text="Waiting for parent commands").pack()
-        tk.Button(self.root, text="Logout", command=self.logout).pack(pady=10)
-
-    def logout(self):
-        self.client.send("LOGOUT")
-        self.client.close()
-        self.root.destroy()
-
+        tk.Label(self.root, text="Child Mode Active", font=("Arial", 16), fg="green").pack(pady=50)
+        tk.Label(self.root, text="Monitoring is running in background...").pack()
 
 if __name__ == "__main__":
-    app = ClientGUI()
-    app.root.mainloop()
+    gui = ClientGUI()
+    gui.root.mainloop()
