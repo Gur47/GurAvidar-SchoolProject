@@ -270,32 +270,24 @@ class ClientGUI:
 
 if __name__ == "__main__":
 
-    
-    # בדיקה האם הועבר נתיב לקובץ credentials כארגומנט (עבור ה-POC)
     if len(sys.argv) > 1:
         config_file = sys.argv[1]
         if os.path.exists(config_file):
             with open(config_file, "r") as f:
-                # פורמט מצופה בקובץ: username|password
-                creds = f.read().strip().split("|")
-                if len(creds) == 2:
-                    user, pwd = creds
+                data = f.read().strip().split("|")
+                if len(data) == 3:
+                    action, user, pwd = data # עכשיו יש 3 פרמטרים
                     
-                    # הרצה ללא GUI
                     c = Client()
                     c.connect()
-                    c.send(f"LOGIN|{user}|{pwd}")
+                    
+                    # שליחת הבקשה לפי מה שכתוב בקובץ
+                    c.send(f"{action}|{user}|{pwd}")
                     response = c.receive()
                     
-                    if "LOGIN_OK" in response:
-                        print(f"Client {user} connected successfully.")
-                        # כאן הלקוח פשוט נשאר מחובר ומחכה להוראות מהשרת
-                        while True:
-                            time.sleep(1)
+                    if "OK" in response:
+                        print(f"Success: {action} for {user}")
+                        if action == "LOGIN":
+                            while True: time.sleep(1) # נשאר מחובר
                     else:
-                        print(f"Login failed for {user}")
-    else:
-        # הרצה רגילה עם GUI (מה שהיה לך קודם)
-        root = tk.Tk()
-        app = ClientGUI(root)
-        root.mainloop()
+                        print(f"Failed: {action} for {user}. Server said: {response}")
