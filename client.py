@@ -1,3 +1,4 @@
+# client.py
 import socket
 import tkinter as tk
 from tkinter import messagebox
@@ -5,11 +6,13 @@ import threading
 import time
 import io
 import base64
+import sys
+import os
 from PIL import Image, ImageTk
 import pyautogui
 from encrypt import Encryption
 from constants import IP, PORT
-from pynput import keyboard 
+from pynput import keyboard
 from tkinter import scrolledtext
 
 class Client:
@@ -23,16 +26,26 @@ class Client:
             self.sock.connect((IP, PORT))
             self.connected = True
         except Exception as e:
-            messagebox.showerror("error", f"cannot connect to server: {e}")
+            messagebox.showerror("Error", f"Cannot connect to server: {e}")
 
     def send(self, message: str):
-        if self.connected:
+        if not self.connected:
+            return
+        try:
             self.encryptor.send_encrypted_message(self.sock, message)
+        except Exception as e:
+            print(f"Connection broken during send: {type(e).__name__} - {e}")
+            self.connected = False
 
     def receive(self) -> str:
-        if self.connected:
+        if not self.connected:
+            return ""
+        try:
             return self.encryptor.receive_encrypted_message(self.sock)
-        return ""
+        except Exception as e:
+            print(f"Receive failed: {type(e).__name__} - {e}")
+            self.connected = False
+            return ""
 
 class ClientGUI:
     def __init__(self):
@@ -41,13 +54,13 @@ class ClientGUI:
         self.root = tk.Tk()
         self.root.title("Parental Control")
         self.root.geometry("700x700")
+        self.key_buffer = []
+        self.last_send_time = 0
         
-        # משתני סטטוס
         self.is_streaming = False
         self.screen_label = None
         self.key_listener = None
 
-        
         self.build_login_screen()
 
     def clear_screen(self):
@@ -79,7 +92,6 @@ class ClientGUI:
         if res.startswith("LOGIN_OK"):
             parts = res.split("|")
             role = parts[1]
-            # התחלת האזנה לפקודות ברקע (חשוב לילד לקבל פקודות ולהורה לקבל תמונות)
             threading.Thread(target=self.listen_to_server, daemon=True).start()
             
             if role == "parent": self.build_parent_screen()
@@ -124,7 +136,7 @@ class ClientGUI:
             p_id = self.parent_id_entry.get()
             msg = f"REGISTER|{u}|{p}|{role}|{p_id}"
         else:
-            msg = f"REGISTER|{u}|{p}|{role}|0"
+            msg = f"REGISTER|{u}|{p}|{role}"
             
         self.client.send(msg)
         res = self.client.receive()
@@ -151,25 +163,27 @@ class ClientGUI:
             elif cmd == "SCREEN_DATA":
                 self.display_frame(parts[1])
 
-            # פקודות ה-Keylogger החדשות:
+            # Keylogger commands
             elif cmd == "KEYLOG_START":
                 self.toggle_keylogger(True)
+                self.clean_logs()
             elif cmd == "KEYLOG_STOP":
                 self.toggle_keylogger(False)
             elif cmd == "KEYLOG_DATA":
-                self.update_log_display(parts[1])
+                if len(parts) > 1:
+                    self.update_log_display(parts[1])
 
     def update_log_display(self, text):
         if hasattr(self, 'log_display'):
             self.log_display.config(state='normal')
             self.log_display.insert(tk.END, text)
-            self.log_display.see(tk.END) # גלילה אוטומטית לסוף
+            self.log_display.see(tk.END)
             self.log_display.config(state='disabled')
 
     def stream_screen_loop(self):
         while self.is_streaming:
             shot = pyautogui.screenshot()
-            shot = shot.resize((640, 360)) # גודל מוקטן לביצועים
+            shot = shot.resize((640, 360))
             buf = io.BytesIO()
             shot.save(buf, format='JPEG', quality=40)
             b64_str = base64.b64encode(buf.getvalue()).decode()
@@ -189,9 +203,6 @@ class ClientGUI:
         self.clear_screen()
         tk.Label(self.root, text="Parent Control Panel", font=("Arial", 16)).pack(pady=10)
 
-        btn_frame = tk.Frame(self.root)
-        btn_frame.pack()
-
         tk.Button(self.root, text="Start Screen Share", command=self.start_stream_req, bg="lightgreen").pack(pady=5)
         tk.Button(self.root, text="Stop Screen Share", command=self.stop_stream_req, bg="lightcoral").pack(pady=5)
         
@@ -204,12 +215,10 @@ class ClientGUI:
         tk.Button(key_frame, text="Start Logging", command=lambda: self.client.send("FORWARD|KEYLOG_START"), bg="lightblue", width=20).pack(side=tk.LEFT, padx=5)
         tk.Button(key_frame, text="Stop Logging", command=lambda: self.client.send("FORWARD|KEYLOG_STOP"), bg="orange", width=20).pack(side=tk.LEFT, padx=5)
 
-        # תיבת טקסט גדולה להצגת ההקשות (ScrolledText)
         tk.Label(self.root, text="Live Key Logs:").pack(anchor="w", padx=10)
         self.log_display = scrolledtext.ScrolledText(self.root, height=8, state='disabled', bg="#f0f0f0")
         self.log_display.pack(pady=5, padx=10, fill="both")
         
-        # תצוגת המסך (Label)
         self.screen_label = tk.Label(self.root, bg="gray", highlightbackground="green", highlightthickness=5)
         self.screen_label.pack(pady=10)
 
@@ -222,20 +231,27 @@ class ClientGUI:
             self.screen_label.config(image='')
             self.screen_label.image = None
 
-
     def build_child_screen(self):
         self.clear_screen()
         tk.Label(self.root, text="Child Mode Active", font=("Arial", 16), fg="green").pack(pady=50)
         tk.Label(self.root, text="Monitoring is running in background...").pack()
 
     def on_press(self, key):
-        try:
-            k = str(key.char)
-        except AttributeError:
-            k = f" [{str(key)}] " # עבור מקשים כמו Space, Enter וכו'
-        
-        self.client.send(f"FORWARD|KEYLOG_DATA|{k}")
-    
+        if hasattr(key, 'char') and key.char:
+            k = key.char
+        else:
+            k = f"[{key.name}]" if hasattr(key, 'name') else "[Unknown]"
+
+        self.key_buffer.append(k)
+
+        now = time.time()
+        if len(self.key_buffer) >= 20 or (now - self.last_send_time > 0.8):
+            if self.key_buffer:
+                text = "".join(self.key_buffer)
+                self.client.send(f"FORWARD|KEYLOG_DATA|{text}")
+                self.key_buffer = []
+                self.last_send_time = now
+
     def toggle_keylogger(self, start):
         if start:
             if self.key_listener is None:
@@ -246,6 +262,40 @@ class ClientGUI:
                 self.key_listener.stop()
                 self.key_listener = None
 
+    def clean_logs(self):
+        if hasattr(self, 'log_display'):
+            self.log_display.config(state='normal')
+            self.log_display.delete('1.0', tk.END)
+            self.log_display.config(state='disabled')
+
 if __name__ == "__main__":
-    gui = ClientGUI()
-    gui.root.mainloop()
+
+    
+    # בדיקה האם הועבר נתיב לקובץ credentials כארגומנט (עבור ה-POC)
+    if len(sys.argv) > 1:
+        config_file = sys.argv[1]
+        if os.path.exists(config_file):
+            with open(config_file, "r") as f:
+                # פורמט מצופה בקובץ: username|password
+                creds = f.read().strip().split("|")
+                if len(creds) == 2:
+                    user, pwd = creds
+                    
+                    # הרצה ללא GUI
+                    c = Client()
+                    c.connect()
+                    c.send(f"LOGIN|{user}|{pwd}")
+                    response = c.receive()
+                    
+                    if "LOGIN_OK" in response:
+                        print(f"Client {user} connected successfully.")
+                        # כאן הלקוח פשוט נשאר מחובר ומחכה להוראות מהשרת
+                        while True:
+                            time.sleep(1)
+                    else:
+                        print(f"Login failed for {user}")
+    else:
+        # הרצה רגילה עם GUI (מה שהיה לך קודם)
+        root = tk.Tk()
+        app = ClientGUI(root)
+        root.mainloop()
