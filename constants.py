@@ -10,3 +10,7 @@ DB_CONFIG = {
     "password": "2wsx3edc4rfv.",
     "database": "mysql"
 }
+
+# Connection limits
+MAX_TOTAL_CONNECTIONS = 15
+MAX_CONNECTIONS_PER_IP = 3

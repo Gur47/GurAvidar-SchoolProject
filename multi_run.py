@@ -1,58 +1,70 @@
+# multi_run.py
+"""
+Spawns 20 simultaneous client threads.
+
+Each thread runs client.py as a subprocess with NO command-line arguments.
+The client itself picks a random credentials file from the 10 pre-existing
+static files (creds_1.txt … creds_10.txt).
+
+Pre-existing credential files must already exist in the project directory —
+this script never creates or deletes them.
+"""
+
 import threading
 import subprocess
-import time
-import os
 import sys
+import time
 
-def run_client(index, action, username, password):
-    """
-    index: מספר הלקוח
-    action: פעולה (LOGIN או REGISTER)
-    username/password: פרטי גישה
-    """
-    filename = f"creds_{index}.txt"
-    
-    # יצירת הקובץ בפורמט שהמורה ביקש: Action|User|Pass
-    with open(filename, "w") as f:
-        f.write(f"{action}|{username}|{password}")
-    
-    print(f"[Client {index}] Attempting {action} for {username}...")
-    
-    # הרצה
-    subprocess.run([sys.executable, "client.py", filename])
 
-    # ניקוי
-    if os.path.exists(filename):
-        os.remove(filename)
+NUM_CLIENTS = 20
+
+
+def run_client(index: int):
+    """Launch a single client process (no arguments)."""
+    print(f"[Thread {index:02d}] Starting client...")
+    try:
+        result = subprocess.run(
+            [sys.executable, "client.py"],
+            capture_output=True,
+            text=True,
+            timeout=30          # safety timeout per client
+        )
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+
+        if stdout:
+            for line in stdout.splitlines():
+                print(f"[Thread {index:02d}] {line}")
+        if stderr:
+            for line in stderr.splitlines():
+                print(f"[Thread {index:02d}] STDERR: {line}")
+
+    except subprocess.TimeoutExpired:
+        print(f"[Thread {index:02d}] Timed out after 30 s.")
+    except Exception as e:
+        print(f"[Thread {index:02d}] Error: {type(e).__name__} — {e}")
+
+    print(f"[Thread {index:02d}] Done.")
+
 
 def main():
+    print(f"Launching {NUM_CLIENTS} simultaneous client threads...")
     threads = []
-    
-    # הגדרת התרחישים (סה"כ 10 לקוחות)
-    scenarios = []
-    
-    # 6 לקוחות: לוגין מוצלח (קיימים ב-SQL עם סיסמה "123")
-    for i in range(1, 7):
-        scenarios.append(("LOGIN", f"test_user_{i}", "123"))
-        
-    # 2 לקוחות: לוגין נכשל (משתמש קיים ב-SQL אבל סיסמה שגויה)
-    scenarios.append(("LOGIN", "test_user_1", "wrong_password"))
-    scenarios.append(("LOGIN", "test_user_2", "111111"))
-    
-    # 2 לקוחות: רישום חדש (לא קיימים ב-SQL)
-    scenarios.append(("REGISTER", "new_bot_9", "pass9"))
-    scenarios.append(("REGISTER", "new_bot_10", "pass10"))
 
-    print(f"Starting POC with {len(scenarios)} diverse clients...")
-
-    for i, (action, user, pwd) in enumerate(scenarios):
-        t = threading.Thread(target=run_client, args=(i+1, action, user, pwd))
+    for i in range(1, NUM_CLIENTS + 1):
+        t = threading.Thread(target=run_client, args=(i,), daemon=False)
         threads.append(t)
-        t.start()
-        time.sleep(0.3)
 
+    # Start all threads as close to simultaneously as possible
+    for t in threads:
+        t.start()
+
+    # Wait for all to finish
     for t in threads:
         t.join()
+
+    print("All client threads completed.")
+
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,1 @@
+REGISTER|bot_user_9|pass9|parent
