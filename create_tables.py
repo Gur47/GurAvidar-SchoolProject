@@ -15,7 +15,10 @@ def create_all_tables(db):
         "client_sibling_id INT, "
         "client_ddos_status BOOLEAN, "
         "client_total_audio_logs INT, "
-        "client_total_keylogs INT"
+        "client_total_keylogs INT, "
+        "client_ip_banned BOOLEAN DEFAULT FALSE, "
+        "client_2fa_enabled BOOLEAN DEFAULT FALSE, "
+        "client_2fa_secret VARCHAR(255)"
         ")"
     )
 
@@ -29,3 +32,4 @@ def create_all_tables(db):
         "keylog_path_name VARCHAR(255)"
         ")"
     )
+

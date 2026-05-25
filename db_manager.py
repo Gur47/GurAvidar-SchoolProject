@@ -150,8 +150,8 @@ class DatabaseManager:
         tables = self.show_tables()
         if table_name in tables:
             cursor = self.conn.cursor()
-            query = f"DELETE FROM {table_name} WHERE {column_name} = '{column_value}'"
-            cursor.execute(query)
+            query = f"DELETE FROM {table_name} WHERE {column_name} = %s"
+            cursor.execute(query, (column_value,))
             self.conn.commit()
             print(f"Row deleted from table {table_name} successfully.")
         else:
@@ -192,8 +192,8 @@ class DatabaseManager:
         tables = self.show_tables()
         if table_name in tables:
             cursor = self.conn.cursor()
-            query = f"SELECT * FROM {table_name} WHERE {column_name} = '{column_value}'"
-            cursor.execute(query)
+            query = f"SELECT * FROM {table_name} WHERE {column_name} = %s"
+            cursor.execute(query, (column_value,))
             return cursor.fetchall()
         else:
             print(f"Table {table_name} does not exist.")

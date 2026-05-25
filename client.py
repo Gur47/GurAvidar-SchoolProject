@@ -1,7 +1,7 @@
 # client.py
 import socket
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 import threading
 import time
 import io
@@ -11,6 +11,8 @@ import random
 from datetime import datetime
 from PIL import Image, ImageTk
 import pyautogui
+import pyotp
+import qrcode
 from encrypt import Encryption
 from constants import IP, PORT
 from pynput import keyboard as kb_module
@@ -82,27 +84,6 @@ def _card(parent):
 def _sep(parent):
     tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", pady=12)
 
-
-# ── Network layer ──────────────────────────────────────────────────────────────
-def pick_credentials():
-    candidates = list(CREDS_FILES)
-    random.shuffle(candidates)
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                with open(path, "r") as f:
-                    data = f.read().strip().split("|")
-                if len(data) >= 3:
-                    action = data[0].upper()
-                    user, pwd = data[1], data[2]
-                    role = data[3] if len(data) >= 4 else "parent"
-                    if action in ("LOGIN", "REGISTER"):
-                        return action, user, pwd, role
-            except Exception:
-                pass
-    return None
-
-
 class Client:
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -158,16 +139,22 @@ def run_headless(action, username, password, role="parent"):
            if action == "REGISTER" else f"{action}|{username}|{password}")
     c.send(msg)
     response = c.receive()
-    if "OK" in response:
+    if not response:
+        print(f"[Headless] No response — server disconnected us (likely DDoS rejection)")
+        return
+    if "IP_BANNED" in response:
+        print(f"[Headless] REJECTED — this IP is permanently banned: {response}")
+    elif "DDOS_DETECTED" in response or "SERVER_FULL" in response:
+        print(f"[Headless] REJECTED by server: {response}")
+    elif "DDOS_BLOCKED" in response:
+        print(f"[Headless] BLOCKED — this account is DDoS-banned: {response}")
+    elif "OK" in response:
         print(f"[Headless] {action} succeeded for '{username}'. Response: {response}")
         if action == "LOGIN":
-            try:
-                while c.connected:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                pass
+            time.sleep(8)
     else:
         print(f"[Headless] {action} failed for '{username}'. Server said: {response}")
+    c.disconnect()
 
 
 # ── GUI ────────────────────────────────────────────────────────────────────────
@@ -192,6 +179,8 @@ class ClientGUI:
         self._screen_img_id = None   # canvas image item id (for flicker-free updates)
         self.key_listener   = None
         self._role          = None   # set after login
+        self._client_id     = None   # set after login
+        self._sibling_id    = None   # set after login
 
         if not connected:
             messagebox.showerror("Connection Error",
@@ -301,15 +290,63 @@ class ClientGUI:
         self.client.send(f"LOGIN|{u}|{p}")
         res = self.client.receive()
 
-        if res.startswith("LOGIN_OK"):
+        if res.startswith("LOGIN_2FA_REQUIRED"):
+            # Prompt for 2FA code
+            self._login_err.config(text="⚠  Enter 2FA code from your authenticator")
+            self.root.update_idletasks()
+            
+            # Show 2FA prompt dialog
+            code = tk.simpledialog.askstring(
+                "Two-Factor Authentication",
+                "Enter the 6-digit code from your authenticator app:",
+                show="*"
+            )
+            if code and len(code.strip()) == 6:
+                self.client.send(f"2FA_CODE|{code.strip()}")
+                res = self.client.receive()
+                if res.startswith("LOGIN_OK"):
+                    parts = res.split("|")
+                    self._role = parts[1]
+                    sibling_str = parts[2] if len(parts) > 2 else "NONE"
+                    self._sibling_id = None if sibling_str == "NONE" else int(sibling_str)
+                    self._client_id = None
+                    
+                    threading.Thread(target=self.listen_to_server, daemon=True).start()
+                    if self._role == "parent":
+                        self.build_parent_screen()
+                    else:
+                        self.build_child_screen()
+                elif "2FA_MAX_ATTEMPTS" in res:
+                    self._login_err.config(text="✗  Too many failed attempts. Please try again later.")
+                    self.p_entry.delete(0, tk.END)
+                else:
+                    self._login_err.config(text="✗  Invalid 2FA code. Try again.")
+                    self.p_entry.delete(0, tk.END)
+            else:
+                self._login_err.config(text="✗  Invalid code format.")
+                self.p_entry.delete(0, tk.END)
+
+        elif res.startswith("LOGIN_OK"):
             parts = res.split("|")
             self._role = parts[1]
+            # Parse sibling_id: "NONE" means no sibling, otherwise it's the ID
+            sibling_str = parts[2] if len(parts) > 2 else "NONE"
+            self._sibling_id = None if sibling_str == "NONE" else int(sibling_str)
+            
+            # For now, generate a placeholder client_id (in production, server should send it)
+            # TODO: server should return client_id in LOGIN_OK response
+            self._client_id = None
+            
             # Start background listener BEFORE switching screen
             threading.Thread(target=self.listen_to_server, daemon=True).start()
             if self._role == "parent":
                 self.build_parent_screen()
             else:
                 self.build_child_screen()
+        elif "LOGIN_FAIL" in res:
+            reason = res.split("|")[1] if len(res.split("|")) > 1 else "Invalid username or password"
+            self._login_err.config(text=f"✗  {reason}")
+            self.p_entry.delete(0, tk.END)
         else:
             self._login_err.config(text="✗  Invalid username or password.")
             self.p_entry.delete(0, tk.END)
@@ -387,17 +424,91 @@ class ClientGUI:
         if not u or not p:
             self._reg_err.config(text="⚠  Please fill in both fields.")
             return
-        msg = (f"REGISTER|{u}|{p}|{role}|{self._pid_entry.get().strip()}"
-               if role == "child" else f"REGISTER|{u}|{p}|{role}")
+        if len(p) < 6:
+            self._reg_err.config(text="⚠  Password must be at least 6 characters.")
+            return
+        
+        # Ask if user wants to enable 2FA
+        setup_2fa = messagebox.askyesno(
+            "Two-Factor Authentication",
+            "Would you like to enable Two-Factor Authentication (2FA)?\n\n"
+            "This will require you to enter a 6-digit code from an authenticator app when logging in."
+        )
+        
+        secret = None
+        if setup_2fa:
+            # Generate TOTP secret
+            secret = pyotp.random_base32()
+            
+            # Generate QR code for easy setup
+            totp = pyotp.TOTP(secret)
+            qr = qrcode.QRCode(version=1, box_size=10, border=5)
+            qr.add_data(totp.provisioning_uri(name=u, issuer_name='Parental Control'))
+            qr.make(fit=True)
+            
+            # Show QR code in a simple window
+            img = qr.make_image(fill_color="black", back_color="white")
+            
+            # Convert to PhotoImage for display
+            from PIL import ImageTk
+            photo = ImageTk.PhotoImage(img)
+            
+            qr_window = tk.Toplevel(self.root)
+            qr_window.title("2FA Setup - Scan with Authenticator")
+            qr_window.geometry("600x680")
+            qr_window.configure(bg=BG)
+            
+            tk.Label(qr_window, text="Scan this QR code with your authenticator app\n(Google Authenticator, Authy, etc.)",
+                     bg=BG, fg=TEXT, font=("Courier New", 10)).pack(pady=10)
+            
+            lbl = tk.Label(qr_window, image=photo, bg=BG)
+            lbl.image = photo
+            lbl.pack(pady=10)
+            
+            tk.Label(qr_window, text=f"Or enter this code manually:\n{secret}",
+                     bg=BG, fg=TEXT_DIM, font=("Courier New", 9), wraplength=300).pack(pady=10)
+            
+            tk.Label(qr_window, text="Click OK once you've scanned the code.",
+                     bg=BG, fg=ACCENT, font=("Courier New", 9, "bold")).pack(pady=10)
+            
+            _btn(qr_window, "OK, I've Scanned It", lambda: qr_window.destroy()).pack(pady=20)
+            
+            qr_window.transient(self.root)
+            qr_window.grab_set()
+            self.root.wait_window(qr_window)
+        
+        # Build registration message
+        if role == "child":
+            parent_id = self._pid_entry.get().strip()
+            if secret:
+                msg = f"REGISTER|{u}|{p}|{role}|{parent_id}|{secret}"
+            else:
+                msg = f"REGISTER|{u}|{p}|{role}|{parent_id}"
+        else:
+            if secret:
+                msg = f"REGISTER|{u}|{p}|{role}|{secret}"
+            else:
+                msg = f"REGISTER|{u}|{p}|{role}"
+        
         self.client.send(msg)
         res = self.client.receive()
+        
         if res.startswith("REGISTER_OK"):
             new_id = res.split("|")[1]
-            messagebox.showinfo("Account Created",
-                                f"Registration successful!\nYour User ID: {new_id}\n\nYou can now log in.")
+            if setup_2fa:
+                msg = (f"Account created with 2FA enabled!\nYour User ID: {new_id}\n\n"
+                       f"You'll need to enter your 6-digit code when logging in.")
+            else:
+                msg = f"Registration successful!\nYour User ID: {new_id}\n\nYou can now log in."
+            messagebox.showinfo("Account Created", msg)
             self.build_login_screen()
+        elif "REGISTER_FAIL" in res:
+            reason = res.split("|")[1] if len(res.split("|")) > 1 else "Unknown error"
+            self._reg_err.config(text=f"✗  {reason}")
+        elif "REGISTER_INVALID_PARENT" in res:
+            self._reg_err.config(text="✗  Invalid parent account. Check the Parent ID.")
         else:
-            self._reg_err.config(text="✗  Registration failed. Check the Parent ID.")
+            self._reg_err.config(text="✗  Registration failed. Try again.")
 
     # ── Parent dashboard ──────────────────────────────────────────────────────
     def build_parent_screen(self):
@@ -407,8 +518,19 @@ class ClientGUI:
         # ── Title row ──
         title_row = tk.Frame(self.root, bg=BG)
         title_row.pack(fill="x", padx=20, pady=(16, 4))
-        tk.Label(title_row, text="MONITORING DASHBOARD",
+        title_left = tk.Frame(title_row, bg=BG)
+        title_left.pack(side="left", fill="x", expand=True)
+        tk.Label(title_left, text="MONITORING DASHBOARD",
                  bg=BG, fg=TEXT, font=FONT_HEAD).pack(side="left")
+        
+        # Show connectivity info
+        if self._sibling_id:
+            tk.Label(title_left, text=f"  •  Monitoring Child #{self._sibling_id}",
+                     bg=BG, fg=ACCENT, font=("Courier New", 11, "bold")).pack(side="left", padx=(10, 0))
+        else:
+            tk.Label(title_left, text="  •  No child linked",
+                     bg=BG, fg=TEXT_DIM, font=("Courier New", 11)).pack(side="left", padx=(10, 0))
+        
         # Live clock
         self._clock_lbl = tk.Label(title_row, text="",
                                    bg=BG, fg=TEXT_DIM,
@@ -540,7 +662,7 @@ class ClientGUI:
         self.clear_screen()
         self._topbar("Child Session")
 
-        tk.Frame(self.root, bg=BG, height=50).pack()
+        tk.Frame(self.root, bg=BG, height=30).pack()
 
         card = _card(self.root)
         card.pack(padx=150, fill="x")
@@ -554,8 +676,15 @@ class ClientGUI:
         tk.Label(card, text="SESSION ACTIVE",
                  bg=SURFACE, fg=TEXT,
                  font=("Courier New", 16, "bold")).pack()
+        
+        # Show parent info
+        if self._sibling_id:
+            parent_txt = f"Parent #{self._sibling_id} is monitoring this session."
+        else:
+            parent_txt = "No parent linked to this account."
+        
         tk.Label(card,
-                 text="Parental monitoring is running in the background.\nYou may continue using the computer normally.",
+                 text=f"Parental monitoring is running in the background.\nYou may continue using the computer normally.\n\n{parent_txt}",
                  bg=SURFACE, fg=TEXT_DIM, font=FONT_SUB,
                  justify="center").pack(pady=(8, 16))
 
@@ -702,10 +831,5 @@ class ClientGUI:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    creds = pick_credentials()
-    if creds is not None:
-        action, username, password, role = creds
-        run_headless(action, username, password, role)
-    else:
-        app = ClientGUI()
-        app.run()
+    app = ClientGUI()
+    app.run()
