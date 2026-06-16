@@ -14,7 +14,7 @@ import pyautogui
 import pyotp
 import qrcode
 from encrypt import Encryption
-from constants import IP, PORT
+from constants import SERVER_IP, PORT
 from pynput import keyboard as kb_module
 
 # ── Credential file paths ──────────────────────────────────────────────────────
@@ -91,8 +91,18 @@ class Client:
         self.connected = False
 
     def connect(self):
+        # Try localhost first (for running on same PC as server)
         try:
-            self.sock.connect((IP, PORT))
+            self.sock.connect(("127.0.0.1", PORT))
+            self.connected = True
+            return True
+        except Exception:
+            pass
+        
+        # Fall back to SERVER_IP (for remote connections)
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((SERVER_IP, PORT))
             self.connected = True
             return True
         except Exception:
@@ -133,7 +143,7 @@ class Client:
 def run_headless(action, username, password, role="parent"):
     c = Client()
     if not c.connect():
-        print(f"[Headless] Cannot connect to {IP}:{PORT}")
+        print(f"[Headless] Cannot connect to {SERVER_IP}:{PORT}")
         return
     msg = (f"{action}|{username}|{password}|{role}"
            if action == "REGISTER" else f"{action}|{username}|{password}")
@@ -165,7 +175,7 @@ class ClientGUI:
 
         self.root = tk.Tk()
         self.root.title("Parental Control  •  Secure Monitor")
-        self.root.geometry("820x640")
+        self.root.geometry("1020x840")
         self.root.configure(bg=BG)
         self.root.resizable(False, False)
 
@@ -184,7 +194,7 @@ class ClientGUI:
 
         if not connected:
             messagebox.showerror("Connection Error",
-                                 f"Cannot connect to server at {IP}:{PORT}")
+                                 f"Cannot connect to server at {SERVER_IP}:{PORT}")
             self.root.destroy()
             return
 
@@ -216,7 +226,7 @@ class ClientGUI:
                      font=("Courier New", 9)).pack(side="left")
 
         if show_status:
-            status_text = f"● {IP}:{PORT}"
+            status_text = f"● {SERVER_IP}:{PORT}"
             tk.Label(bar, text=status_text,
                      bg=SURFACE, fg=SUCCESS,
                      font=("Courier New", 9, "bold")).pack(side="right", padx=20)
@@ -309,7 +319,7 @@ class ClientGUI:
                     self._role = parts[1]
                     sibling_str = parts[2] if len(parts) > 2 else "NONE"
                     self._sibling_id = None if sibling_str == "NONE" else int(sibling_str)
-                    self._client_id = None
+                    self._client_id = int(parts[3]) if len(parts) > 3 else None
                     
                     threading.Thread(target=self.listen_to_server, daemon=True).start()
                     if self._role == "parent":
@@ -455,7 +465,7 @@ class ClientGUI:
             
             qr_window = tk.Toplevel(self.root)
             qr_window.title("2FA Setup - Scan with Authenticator")
-            qr_window.geometry("600x680")
+            qr_window.geometry("800x880")
             qr_window.configure(bg=BG)
             
             tk.Label(qr_window, text="Scan this QR code with your authenticator app\n(Google Authenticator, Authy, etc.)",
@@ -523,13 +533,17 @@ class ClientGUI:
         tk.Label(title_left, text="MONITORING DASHBOARD",
                  bg=BG, fg=TEXT, font=FONT_HEAD).pack(side="left")
         
-        # Show connectivity info
+        # Show connectivity info (with reference for live updates)
         if self._sibling_id:
-            tk.Label(title_left, text=f"  •  Monitoring Child #{self._sibling_id}",
-                     bg=BG, fg=ACCENT, font=("Courier New", 11, "bold")).pack(side="left", padx=(10, 0))
+            lbl_text = f"  •  Monitoring Child #{self._sibling_id}"
+            lbl_fg = ACCENT
         else:
-            tk.Label(title_left, text="  •  No child linked",
-                     bg=BG, fg=TEXT_DIM, font=("Courier New", 11)).pack(side="left", padx=(10, 0))
+            lbl_text = "  •  No child linked"
+            lbl_fg = TEXT_DIM
+        
+        self._sibling_online_label = tk.Label(title_left, text=lbl_text,
+                 bg=BG, fg=lbl_fg, font=("Courier New", 11, "bold"))
+        self._sibling_online_label.pack(side="left", padx=(10, 0))
         
         # Live clock
         self._clock_lbl = tk.Label(title_row, text="",
@@ -620,7 +634,7 @@ class ClientGUI:
         sbar = tk.Frame(self.root, bg=SURFACE2, height=26)
         sbar.pack(fill="x", side="bottom")
         sbar.pack_propagate(False)
-        tk.Label(sbar, text=f"  ● Connected to {IP}:{PORT}",
+        tk.Label(sbar, text=f"  ● Connected to {SERVER_IP}:{PORT}",
                  bg=SURFACE2, fg=SUCCESS, font=("Courier New", 8)).pack(side="left")
         tk.Label(sbar, text="Role: parent  ",
                  bg=SURFACE2, fg=TEXT_DIM, font=("Courier New", 8)).pack(side="right")
@@ -754,6 +768,17 @@ class ClientGUI:
             elif cmd == "KEYLOG_DATA" and len(parts) > 1:
                 text = parts[1]
                 self.root.after(0, self.update_log_display, text)
+            
+            elif cmd == "SIBLING_ONLINE":
+                # Parent receives notification that child came online
+                if len(parts) > 1 and self._role == "parent":
+                    try:
+                        child_id = int(parts[1])
+                        if self._sibling_id is None:
+                            self._sibling_id = child_id
+                        self.root.after(0, self._update_parent_status)
+                    except (ValueError, IndexError):
+                        pass
 
     # ── UI update methods (called on main thread via root.after) ──────────────
     def _display_frame(self, photo):
@@ -784,6 +809,21 @@ class ClientGUI:
             self.log_display.config(state="normal")
             self.log_display.delete("1.0", tk.END)
             self.log_display.config(state="disabled")
+
+    def _update_parent_status(self):
+        """Update parent's UI when child comes online."""
+        if not hasattr(self, "_sibling_online_label"):
+            return
+        if self._sibling_id:
+            self._sibling_online_label.config(
+                text=f"  •  Monitoring Child #{self._sibling_id}",
+                fg=ACCENT
+            )
+        else:
+            self._sibling_online_label.config(
+                text="  •  No child linked",
+                fg=TEXT_DIM
+            )
 
     # ── Screen streaming (runs in background thread) ──────────────────────────
     def stream_screen_loop(self):
@@ -831,5 +871,38 @@ class ClientGUI:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app = ClientGUI()
-    app.run()
+    import sys
+    
+    # Check if running in headless mode (for multi_run testing)
+    if "--headless" in sys.argv:
+        # Extract client index if provided
+        idx = 1
+        for i, arg in enumerate(sys.argv):
+            if arg.startswith("--client="):
+                try:
+                    idx = int(arg.split("=")[1])
+                except ValueError:
+                    pass
+                break
+        
+        # Try to read credentials from file
+        creds_file = os.path.join(CREDS_DIR, f"creds_{idx}.txt")
+        if os.path.exists(creds_file):
+            try:
+                with open(creds_file, "r") as f:
+                    creds_line = f.read().strip()
+                parts = creds_line.split("|")
+                if len(parts) >= 3:
+                    action, username, password = parts[0], parts[1], parts[2]
+                    role = parts[3] if len(parts) > 3 else "parent"
+                    run_headless(action, username, password, role)
+                else:
+                    print(f"[Client {idx}] Invalid credentials format in {creds_file}")
+            except Exception as e:
+                print(f"[Client {idx}] Error reading credentials: {e}")
+        else:
+            print(f"[Client {idx}] Credentials file not found: {creds_file}")
+    else:
+        # GUI mode
+        app = ClientGUI()
+        app.run()

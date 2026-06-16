@@ -9,8 +9,7 @@ import tkinter as tk
 from tkinter import scrolledtext, font as tkfont
 from db_manager import DatabaseManager
 from create_tables import create_all_tables
-from constants import IP, PORT, MAX_TOTAL_CONNECTIONS, MAX_CONNECTIONS_PER_IP, DB_NAME
-from constants import IP, PORT, MAX_TOTAL_CONNECTIONS, MAX_CONNECTIONS_PER_IP
+from constants import SERVER_BIND_IP, SERVER_IP, PORT, MAX_TOTAL_CONNECTIONS, MAX_CONNECTIONS_PER_IP, DB_NAME
 from encrypt import Encryption
 
 # ── Keylog files go into the keylogs/ subfolder ──────────────────────────────
@@ -124,9 +123,9 @@ class Server:
     def start(self):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((IP, PORT))
+        srv.bind((SERVER_BIND_IP, PORT))
         srv.listen()
-        self._log("info", f"Server listening on {IP}:{PORT}")
+        self._log("info", f"Server listening on {SERVER_BIND_IP}:{PORT} (LAN clients should connect to {SERVER_IP}:{PORT})")
         self._log("info", f"Limits — Max total: {MAX_TOTAL_CONNECTIONS}, Max per IP: {MAX_CONNECTIONS_PER_IP}")
 
         while True:
@@ -177,6 +176,16 @@ class Server:
     def _check_ip_limit(self, client_ip):
         with self.lock:
             return len(self.ip_connections.get(client_ip, [])) >= MAX_CONNECTIONS_PER_IP
+    
+    def _would_exceed_global_limit(self):
+        """Check if adding one more connection would exceed global limit."""
+        with self.lock:
+            return self.total_connections >= MAX_TOTAL_CONNECTIONS
+    
+    def _would_exceed_ip_limit(self, client_ip):
+        """Check if adding one more connection from this IP would exceed limit."""
+        with self.lock:
+            return len(self.ip_connections.get(client_ip, [])) >= MAX_CONNECTIONS_PER_IP
 
     def _is_ip_banned(self, client_ip):
         """
@@ -203,7 +212,7 @@ class Server:
             rows = self.db.get_rows_with_value("clients", "client_ip", client_ip)
             for row in rows:
                 self.db.update_row("clients", "client_id", row[0],
-                                   ["client_ip_banned"], [True])
+                                   ["client_ip_banned", "client_ddos_status"], [True, True])
             self._log("info", f"  Banned IP {client_ip} — {len(rows)} client row(s) flagged in DB")
         except Exception as e:
             self._log("error", f"Failed to ban IP {client_ip}: {e}")
@@ -238,6 +247,23 @@ class Server:
                   f"{len(affected)} session(s) killed, IP permanently banned (client_ip_banned=TRUE)")
         self.ui_callback("ddos", {"ip": client_ip, "count": len(affected)})
 
+    def _notify_parent_sibling_online(self, parent_id, child_id):
+        """
+        Send a notification to the parent that their child has connected.
+        Called when a child successfully logs in or registers.
+        """
+        with self.lock:
+            if parent_id in self.clients:
+                parent_socket = self.clients[parent_id]
+                try:
+                    self.encryptor.send_encrypted_message(
+                        parent_socket,
+                        f"SIBLING_ONLINE|{child_id}"
+                    )
+                    self._log("info", f"  📢 Notified parent {parent_id} that child {child_id} came online")
+                except Exception as e:
+                    self._log("error", f"Failed to notify parent {parent_id}: {e}")
+
     # ── Main client handler ───────────────────────────────────────────────────
     def handle_client(self, client_socket, client_ip, client_port):
         client_id = None
@@ -253,7 +279,7 @@ class Server:
             client_socket.close()
             return
 
-        if self._check_global_limit():
+        if self._would_exceed_global_limit():
             self._log("error", f"⛔ Global limit ({MAX_TOTAL_CONNECTIONS}) reached — rejected {client_ip}")
             try:
                 self.encryptor.send_encrypted_message(client_socket, "REJECTED|SERVER_FULL")
@@ -262,7 +288,7 @@ class Server:
             client_socket.close()
             return
 
-        if self._check_ip_limit(client_ip):
+        if self._would_exceed_ip_limit(client_ip):
             self._log("ddos",
                       f"🚨 DDoS DETECTED — IP {client_ip} opened >{MAX_CONNECTIONS_PER_IP} connections! "
                       f"Banning all sessions from this address.")
@@ -346,8 +372,12 @@ class Server:
                         self._register_connection(client_id, client_ip, client_socket)
                         self._log("login", f"✅ Login OK  '{username}'  role={role}  id={client_id}  ip={client_ip}")
 
-                        response = f"LOGIN_OK|{role}|{sibling_id if sibling_id else 'NONE'}"
+                        response = f"LOGIN_OK|{role}|{sibling_id if sibling_id else 'NONE'}|{client_id}"
                         self.encryptor.send_encrypted_message(client_socket, response)
+                        
+                        # Notify parent if this is a child account
+                        if role == "child" and sibling_id:
+                            self._notify_parent_sibling_online(sibling_id, client_id)
 
                 # ── REGISTER ──────────────────────────────────────────────────
                 elif command == "REGISTER":
@@ -513,8 +543,12 @@ class Server:
                                     self._register_connection(cid, session.get("client_ip"), client_socket)
                                     self._log("login", f"✅ Login OK  '{username}'  role={role}  id={cid}  ip={session.get('client_ip')}")
                                     
-                                    response = f"LOGIN_OK|{role}|{sibling_id if sibling_id else 'NONE'}"
+                                    response = f"LOGIN_OK|{role}|{sibling_id if sibling_id else 'NONE'}|{cid}"
                                     self.encryptor.send_encrypted_message(client_socket, response)
+                                    
+                                    # Notify parent if this is a child account
+                                    if role == "child" and sibling_id:
+                                        self._notify_parent_sibling_online(sibling_id, cid)
                                     
                                     # Clean up
                                     del self.waiting_2fa[cid]
@@ -602,14 +636,16 @@ class ServerUI:
             ("KEYLOGS SAVED",      "_stat_klog", SUCCESS),
         ]:
             cell = tk.Frame(stats, bg=SURFACE2)
-            cell.pack(side="left", padx=28, pady=6)
-            lbl = tk.Label(cell, text="0",
-                           bg=SURFACE2, fg=color,
-                           font=("Courier New", 20, "bold"))
-            lbl.pack()
+            cell.pack(side="left", padx=20, pady=6)
+            
+            # Label on top, number below
             tk.Label(cell, text=label,
                      bg=SURFACE2, fg=TEXT_DIM,
-                     font=("Courier New", 8)).pack()
+                     font=("Courier New", 7)).pack()
+            lbl = tk.Label(cell, text="0",
+                           bg=SURFACE2, fg=color,
+                           font=("Courier New", 18, "bold"))
+            lbl.pack()
             setattr(self, attr, lbl)
 
         self._stat_max.config(text=str(MAX_TOTAL_CONNECTIONS))
@@ -637,7 +673,7 @@ class ServerUI:
         # Table header
         header = tk.Frame(db_frame, bg="#0a0e14")
         header.pack(fill="x")
-        for col, width in [("ID", 50), ("IP", 110), ("PORT", 60), ("USER", 110),
+        for col, width in [("ID", 50), ("IP", 200), ("PORT", 60), ("USER", 110),
                            ("ROLE", 60), ("SIBLING", 70), ("BANNED", 60)]:
             tk.Label(header, text=col, bg="#0a0e14", fg=TEXT_DIM,
                      font=("Courier New", 9, "bold"),
@@ -724,7 +760,7 @@ class ServerUI:
         sbar = tk.Frame(self.root, bg=SURFACE2, height=26)
         sbar.pack(fill="x", side="bottom")
         sbar.pack_propagate(False)
-        tk.Label(sbar, text=f"  {IP}:{PORT}",
+        tk.Label(sbar, text=f"  {SERVER_IP}:{PORT}",
                  bg=SURFACE2, fg=TEXT_DIM,
                  font=("Courier New", 8)).pack(side="left")
         self._clock_lbl = tk.Label(sbar, text="",
@@ -786,7 +822,7 @@ class ServerUI:
                     str(row[6] or "—"),                      # SIBLING_ID
                     "🔒 YES" if row[10] else "✓ NO"          # BANNED
                 ]
-                widths = [50, 110, 60, 110, 60, 70, 60]
+                widths = [50, 200, 60, 110, 60, 70, 60]
                 
                 for val, w in zip(vals, widths):
                     tk.Label(row_frame, text=val, bg=row_frame.cget("bg"), fg=TEXT,

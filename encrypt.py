@@ -18,7 +18,7 @@ class Encryption:
         
         Documentation: Creates a new encryption object with predefined keys
         """
-        self.AES_KEY = b"\xa5\\\xb9\xdf\xaa\xc9M\xb5\xf7\xaf\x03\x96k,^S+\x1f\x07w\x7f\xe6\xe6\xe8\x07\x81\xca\x99'\xc4\x8f\xb6"
+        self.AES_KEY = b'K\xdc\xa8\xd2\xe5tr\x18\xba\x85\x859\xa2\x0c\xed]\x8f\xb3$\xbe_i\xf6h\t\xb4\xc9\xb2D%Uj'
         self.AES_NONCE = b'FixedNonce12'  # 12 bytes
 
     def encrypt_data(self, data: bytes) -> str:

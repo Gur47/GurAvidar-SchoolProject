@@ -2,7 +2,8 @@
 # This file contains constants used across the application.
 
 CHUNK_SIZE = 4096
-IP = "127.0.0.1"
+SERVER_BIND_IP = "0.0.0.0"  # Server listens on all network interfaces
+SERVER_IP = "192.168.68.100"  # Client should connect to this server LAN address
 PORT = 9921
 DB_NAME = "MySQL_GurAvidar"
 DB_CONFIG = {
