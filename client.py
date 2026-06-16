@@ -871,38 +871,5 @@ class ClientGUI:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import sys
-    
-    # Check if running in headless mode (for multi_run testing)
-    if "--headless" in sys.argv:
-        # Extract client index if provided
-        idx = 1
-        for i, arg in enumerate(sys.argv):
-            if arg.startswith("--client="):
-                try:
-                    idx = int(arg.split("=")[1])
-                except ValueError:
-                    pass
-                break
-        
-        # Try to read credentials from file
-        creds_file = os.path.join(CREDS_DIR, f"creds_{idx}.txt")
-        if os.path.exists(creds_file):
-            try:
-                with open(creds_file, "r") as f:
-                    creds_line = f.read().strip()
-                parts = creds_line.split("|")
-                if len(parts) >= 3:
-                    action, username, password = parts[0], parts[1], parts[2]
-                    role = parts[3] if len(parts) > 3 else "parent"
-                    run_headless(action, username, password, role)
-                else:
-                    print(f"[Client {idx}] Invalid credentials format in {creds_file}")
-            except Exception as e:
-                print(f"[Client {idx}] Error reading credentials: {e}")
-        else:
-            print(f"[Client {idx}] Credentials file not found: {creds_file}")
-    else:
-        # GUI mode
-        app = ClientGUI()
-        app.run()
+    app = ClientGUI()
+    app.run()
